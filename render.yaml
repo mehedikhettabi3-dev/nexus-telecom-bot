@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: telecom-lead-bot
+    env: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    disk:
+      name: baileys-session-disk
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: AUTH_DIR
+        value: /var/data/auth_info_baileys
+      - key: MONGODB_URI
+        sync: false
+      - key: DB_NAME
+        value: telecom_leads_db
+      - key: ADMIN_PHONE
+        value: 212625489153
+      - key: WASIT_PHONE
+        sync: false

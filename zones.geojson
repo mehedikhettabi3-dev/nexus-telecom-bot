@@ -1,0 +1,90 @@
+{
+  "type": "FeatureCollection",
+  "name": "morocco_fiber_zones",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "city": "Casablanca",
+        "name": "Maarif Extension",
+        "isp": "IAM",
+        "type": "FTTH"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-7.6360, 33.5850],
+            [-7.6300, 33.5850],
+            [-7.6300, 33.5900],
+            [-7.6360, 33.5900],
+            [-7.6360, 33.5850]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "city": "Casablanca",
+        "name": "Maarif Extension",
+        "isp": "Inwi",
+        "type": "FTTH"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-7.6355, 33.5855],
+            [-7.6295, 33.5855],
+            [-7.6295, 33.5905],
+            [-7.6355, 33.5905],
+            [-7.6355, 33.5855]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "city": "Tanger",
+        "name": "Tanger Balia / Malabata",
+        "isp": "IAM",
+        "type": "FTTH"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-5.7850, 35.7720],
+            [-5.7750, 35.7720],
+            [-5.7750, 35.7800],
+            [-5.7850, 35.7800],
+            [-5.7850, 35.7720]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "city": "Rabat",
+        "name": "Agdal Centre",
+        "isp": "Inwi",
+        "type": "FTTH"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-6.8550, 33.9950],
+            [-6.8450, 33.9950],
+            [-6.8450, 34.0050],
+            [-6.8550, 34.0050],
+            [-6.8550, 33.9950]
+          ]
+        ]
+      }
+    }
+  ]
+}
