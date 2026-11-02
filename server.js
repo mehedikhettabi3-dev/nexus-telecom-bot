@@ -163,7 +163,7 @@ async function startWhatsAppBot() {
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     auth: state,
-    browser: ['Nexus-Telecom', 'Desktop', '1.0.0']
+    browser: ['Chrome (Linux)', '', '']
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -171,21 +171,9 @@ async function startWhatsAppBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Si pas encore connecté et qu'on a un numéro de bot, demander un Pairing Code (Code à 8 chiffres)
-    if (!state.creds.registered && !pairingCodeRequested) {
+    // Si déjà enregistré, ne pas demander de code
+    if (!state.creds.me && !pairingCodeRequested) {
       pairingCodeRequested = true;
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(BOT_PHONE);
-          console.log('\n======================================================');
-          console.log(`🔑 WHATSAPP PAIRING CODE FOR (+${BOT_PHONE}): [ ${code} ]`);
-          console.log('======================================================\n');
-          fs.writeFileSync('C:\\Users\\Dell\\Desktop\\PAIRING_CODE.txt', `🔑 CODE WHATSAPP: ${code}\nEntrez ce code sur WhatsApp (Lier avec un code).`);
-          logger.info(`📲 Pairing Code generated and saved to Desktop: ${code}`);
-        } catch (err) {
-          logger.error({ err }, 'Failed to get Pairing Code');
-        }
-      }, 4000);
     }
 
     if (qr) {
@@ -204,11 +192,12 @@ async function startWhatsAppBot() {
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      logger.warn(` WhatsApp connection closed. Reconnecting: ${shouldReconnect}`);
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      logger.warn(` WhatsApp connection closed (code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
       if (shouldReconnect) {
-        setTimeout(startWhatsAppBot, 5000);
+        pairingCodeRequested = false;
+        setTimeout(startWhatsAppBot, 3000);
       }
     } else if (connection === 'open') {
       logger.info(' WhatsApp Bot is ONLINE and connected successfully! 🚀');
