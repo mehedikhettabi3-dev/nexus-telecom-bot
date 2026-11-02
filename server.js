@@ -18,7 +18,8 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 
 // 1. CONFIGURATION & ENVIRONMENT VARIABLES
 const PORT = process.env.PORT || 3000;
@@ -171,7 +172,15 @@ async function startWhatsAppBot() {
       console.log('\n======================================================');
       console.log('📲 SCAN THIS QR CODE WITH YOUR WHATSAPP BUSINESS PHONE:');
       console.log('======================================================\n');
-      qrcode.generate(qr, { small: true });
+      qrcodeTerminal.generate(qr, { small: true });
+
+      // Enregistrer également l'image QR sur le Bureau pour scan facile
+      const desktopQrPath = 'C:\\Users\\Dell\\Desktop\\WHATSAPP_QR.png';
+      QRCode.toFile(desktopQrPath, qr, { width: 400 }, function (err) {
+        if (!err) {
+          logger.info(`📸 QR Code image saved to Desktop: ${desktopQrPath}`);
+        }
+      });
     }
 
     if (connection === 'close') {
