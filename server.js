@@ -28,6 +28,9 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const DB_NAME = process.env.DB_NAME || 'telecom_leads_db';
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '');
 const WASIT_PHONE = (process.env.WASIT_PHONE || ADMIN_PHONE).replace(/\D/g, '');
+const BOT_PHONE = (process.env.BOT_PHONE || '212699469649').replace(/\D/g, '');
+
+let pairingCodeRequested = false;
 
 const logger = pino({ level: 'info' });
 
@@ -165,8 +168,25 @@ async function startWhatsAppBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
+
+    // Si pas encore connecté et qu'on a un numéro de bot, demander un Pairing Code (Code à 8 chiffres)
+    if (!state.creds.registered && !pairingCodeRequested) {
+      pairingCodeRequested = true;
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(BOT_PHONE);
+          console.log('\n======================================================');
+          console.log(`🔑 WHATSAPP PAIRING CODE FOR (+${BOT_PHONE}): [ ${code} ]`);
+          console.log('======================================================\n');
+          fs.writeFileSync('C:\\Users\\Dell\\Desktop\\PAIRING_CODE.txt', `🔑 CODE WHATSAPP: ${code}\nEntrez ce code sur WhatsApp (Lier avec un code).`);
+          logger.info(`📲 Pairing Code generated and saved to Desktop: ${code}`);
+        } catch (err) {
+          logger.error({ err }, 'Failed to get Pairing Code');
+        }
+      }, 4000);
+    }
 
     if (qr) {
       console.log('\n======================================================');
