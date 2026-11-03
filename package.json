@@ -2,10 +2,10 @@
   "name": "telecom-lead-bot",
   "version": "1.0.0",
   "description": "Production WhatsApp Bot for Moroccan Telecom Lead Generation (IAM, Inwi, Orange)",
-  "main": "server.js",
+  "main": "real_production_bot.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node real_production_bot.js",
+    "dev": "nodemon real_production_bot.js"
   },
   "dependencies": {
     "@tmcw/togeojson": "^7.1.3",

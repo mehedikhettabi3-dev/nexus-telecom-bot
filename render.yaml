@@ -1,25 +1,21 @@
 services:
-  - type: web
-    name: telecom-lead-bot
+  - type: worker
+    name: nexus-telecom-bot
     env: node
-    plan: starter
+    plan: free
     region: frankfurt
     buildCommand: npm install
-    startCommand: node server.js
+    startCommand: node real_production_bot.js
     disk:
       name: baileys-session-disk
       mountPath: /var/data
       sizeGB: 1
     envVars:
-      - key: PORT
-        value: 3000
       - key: AUTH_DIR
         value: /var/data/auth_info_baileys
-      - key: MONGODB_URI
-        sync: false
-      - key: DB_NAME
-        value: telecom_leads_db
       - key: ADMIN_PHONE
         value: 212625489153
       - key: WASIT_PHONE
-        sync: false
+        value: 212699469649
+      - key: BOT_PHONE
+        value: 212699469649
