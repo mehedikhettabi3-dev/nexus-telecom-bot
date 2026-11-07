@@ -1,14 +1,7 @@
 /**
  * ============================================================================
- * NEXUS-TELECOM BOT v4.0 — PRODUCTION ENGINE
- * Fixes:
- *  1. Admin recognition — no alerts sent to admin for his own messages
- *  2. Client notification to admin with client phone number
- *  3. Group messages fully blocked
- *  4. Name validation — rejects links/phone numbers/long texts
- *  5. WiFi drop recovery — waits for internet before reconnecting (no spam)
- *  6. Spatial BBox index for fast GIS (2,448 zones, <100ms response)
- *  7. Natural 5-second typing delay for customers
+ * NEXUS-TELECOM BOT v5.1 — PRODUCTION ENGINE
+ * Robust Lead Management + Persistent Sessions + Clean Phone Parsing
  * ============================================================================
  */
 
@@ -17,29 +10,64 @@ const path = require('path');
 const fs = require('fs');
 const pino = require('pino');
 const turf = require('@turf/turf');
-const dns = require('dns');
 const net = require('net');
-const { EventEmitter } = require('events');
+const express = require('express');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason
 } = require('@whiskeysockets/baileys');
 
-const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
+const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info_baileys');
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '');
 const WASIT_PHONE = (process.env.WASIT_PHONE || '212699469649').replace(/\D/g, '');
 const BOT_PHONE   = (process.env.BOT_PHONE   || '212699469649').replace(/\D/g, '');
 
-// All admin/operator numbers that the bot knows — will not treat them as clients
 const KNOWN_ADMINS = new Set([ADMIN_PHONE, WASIT_PHONE, BOT_PHONE]);
-
-const logger = pino({ level: 'info' });
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
-let reconnectDelay = 3000;
 
 // ============================================================================
-// 1. LOAD 2,448 REAL ZONES + SPATIAL BOUNDING-BOX INDEX
+// 1. PERSISTENT SESSIONS (Saved to sessions.json so state is NEVER lost on reconnect)
+// ============================================================================
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+let sessions = {};
+try {
+  if (fs.existsSync(SESSIONS_FILE)) {
+    sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+  }
+} catch (_) {
+  sessions = {};
+}
+
+function saveSessions() {
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
+  } catch (_) {}
+}
+
+function normalizePhone(jid) {
+  if (!jid) return '';
+  // Remove @s.whatsapp.net, @lid, and any :device suffix (:0, :1, etc)
+  return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+function getSession(phone) {
+  if (!sessions[phone]) {
+    sessions[phone] = { step: 'IDLE', lastActivity: Date.now() };
+    saveSessions();
+  }
+  return sessions[phone];
+}
+
+function updateSession(phone, data) {
+  sessions[phone] = { ...(sessions[phone] || {}), ...data, lastActivity: Date.now() };
+  saveSessions();
+  return sessions[phone];
+}
+
+// ============================================================================
+// 2. LOAD 2,448 REAL ZONES + SPATIAL BOUNDING-BOX INDEX
 // ============================================================================
 let spatialIndex = [];
 try {
@@ -52,15 +80,15 @@ try {
       catch (_) { return null; }
     })
     .filter(Boolean);
-  logger.info(`✅ Loaded ${zonesData.features.length} zones. Index: ${spatialIndex.length} entries.`);
+  logger.info(`✅ Loaded ${zonesData.features.length} zones. Spatial index: ${spatialIndex.length} entries.`);
 } catch (e) {
   logger.error('❌ Failed to load zones.geojson: ' + e.message);
 }
 
 // ============================================================================
-// 2. GIS ENGINE — BBox pre-filter + accurate nearest-point distance
+// 3. GIS ENGINE — BBox pre-filter + nearest-point distance
 // ============================================================================
-const BBOX_PAD = 1500 / 111320; // 1.5km in degrees
+const BBOX_PAD = 1500 / 111320; // 1.5km search window
 
 function evaluateRealCoverage(lat, lng) {
   const pt = turf.point([lng, lat]);
@@ -68,7 +96,6 @@ function evaluateRealCoverage(lat, lng) {
     lng >= bbox[0] - BBOX_PAD && lng <= bbox[2] + BBOX_PAD &&
     lat >= bbox[1] - BBOX_PAD && lat <= bbox[3] + BBOX_PAD
   );
-  logger.info(`🔍 [GIS] ${candidates.length} candidates for (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
 
   let nearestZone = null;
   let minDist = 9999999;
@@ -76,7 +103,7 @@ function evaluateRealCoverage(lat, lng) {
   for (const { feature: f } of candidates) {
     try {
       if (turf.booleanPointInPolygon(pt, f)) {
-        return { status: 'DIRECT', zoneName: f.properties.name || 'المنطقة', operator: op(f), distanceMeters: 0 };
+        return { status: 'DIRECT', zoneName: f.properties.name || 'المنطقة', operator: detectOp(f), distanceMeters: 0 };
       }
     } catch (_) {}
     try {
@@ -101,7 +128,7 @@ function evaluateRealCoverage(lat, lng) {
 
   const name = nearestZone?.properties?.name || 'المنطقة';
   const d = Math.round(minDist);
-  const operator = nearestZone ? op(nearestZone) : 'IAM / Inwi';
+  const operator = nearestZone ? detectOp(nearestZone) : 'IAM / Inwi';
 
   if (d <= 50)  return { status: 'BUFFER_15M',   zoneName: name, operator, distanceMeters: d };
   if (d <= 300) return { status: 'PROXIMITY_90',  zoneName: name, operator, distanceMeters: d };
@@ -109,7 +136,7 @@ function evaluateRealCoverage(lat, lng) {
   return { status: 'NO_COVERAGE', zoneName: name, operator: 'غير متوفر', distanceMeters: d };
 }
 
-function op(f) {
+function detectOp(f) {
   const fill = (f.properties?.fill || '').toLowerCase();
   const name = (f.properties?.name || '').toLowerCase();
   if (fill === '#00aaff' || name.includes('inwi')) return 'Inwi';
@@ -118,7 +145,7 @@ function op(f) {
 }
 
 // ============================================================================
-// 3. COORD EXTRACTOR
+// 4. COORD EXTRACTOR
 // ============================================================================
 function extractCoords(msg) {
   const loc = msg.locationMessage || msg.liveLocationMessage;
@@ -134,21 +161,12 @@ function extractCoords(msg) {
 }
 
 // ============================================================================
-// 4. SESSIONS
-// ============================================================================
-const sessions = new Map();
-function getSession(phone) {
-  if (!sessions.has(phone)) sessions.set(phone, { step: 'IDLE', lastActivity: Date.now() });
-  return sessions.get(phone);
-}
-
-// ============================================================================
 // 5. SEND HELPERS
 // ============================================================================
 async function sendWithDelay(sock, jid, text) {
   try {
     await sock.sendPresenceUpdate('composing', jid);
-    await new Promise(r => setTimeout(r, 4500));
+    await new Promise(r => setTimeout(r, 4000));
     await sock.sendPresenceUpdate('paused', jid);
   } catch (_) {}
   const sent = await sock.sendMessage(jid, { text });
@@ -163,14 +181,13 @@ async function sendNow(sock, jid, text) {
 }
 
 // ============================================================================
-// 6. ADMIN ALERTS — with client phone number
+// 6. ADMIN & LEAD ALERTS
 // ============================================================================
-async function alertAdmins(sock, clientPhone, event, extra = '') {
+async function alertAdmins(sock, clientPhone, event) {
   const msg =
-    `🔔 *إشعار NEXUS-TELECOM* 🔔\n\n` +
+    `🔔 *إشعار زبون جديد — NEXUS TELECOM* 🔔\n\n` +
     `📞 *رقم الزبون:* +${clientPhone}\n` +
-    `📋 *الحدث:* ${event}` +
-    (extra ? `\n${extra}` : '');
+    `📋 *الحالة:* ${event}`;
   for (const r of [...new Set([ADMIN_PHONE, WASIT_PHONE])]) {
     try { await sendNow(sock, `${r}@s.whatsapp.net`, msg); }
     catch (_) {}
@@ -180,159 +197,154 @@ async function alertAdmins(sock, clientPhone, event, extra = '') {
 async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
   const link = `https://maps.google.com/?q=${lat},${lng}`;
   const msg =
-    `🚨 *NEXUS LEAD — طلب فايبر مؤهل جديد* 🚨\n\n` +
-    `👤 *الزبون:* ${name}\n` +
-    `📞 *الهاتف:* +${clientPhone}\n` +
-    `📍 *أقرب كابلاج:* ${result.zoneName}\n` +
-    `📏 *المسافة:* ${result.distanceMeters}م\n` +
-    `📡 *المشغل:* ${result.operator}\n` +
-    `📊 *التغطية:* ${result.status}\n` +
-    `🗺️ *الموقع:* ${link}\n\n` +
-    `⚡ تواصل مع الزبون فوراً لإغلاق الصفقة!`;
+    `🚨 *طلب اشتراك فايبر جديد مؤهل (LEAD)* 🚨\n\n` +
+    `👤 *اسم الزبون:* ${name}\n` +
+    `📞 *رقم هاتف الزبون:* +${clientPhone}\n` +
+    `📍 *أقرب منطقة كابلاج:* ${result.zoneName}\n` +
+    `📏 *المسافة من الكابل:* ${result.distanceMeters}م\n` +
+    `📡 *المشغل المؤهل:* ${result.operator}\n` +
+    `📊 *نوع التغطية:* ${result.status}\n` +
+    `🗺️ *موقع الزبون:* ${link}\n\n` +
+    `⚡ المرجو الاتصال به فوراً لتأكيد التركيب!`;
+
   for (const r of [...new Set([ADMIN_PHONE, WASIT_PHONE])]) {
     try {
       await sendNow(sock, `${r}@s.whatsapp.net`, msg);
       logger.info(`📨 Lead alert sent to ${r}`);
-    } catch (e) { logger.warn(`Alert failed for ${r}: ${e.message}`); }
+    } catch (e) {
+      logger.warn(`Alert failed for ${r}: ${e.message}`);
+    }
   }
 }
 
-// ============================================================================
-// 7. NAME VALIDATOR
-// ============================================================================
 function isValidName(t) {
-  if (!t || t.length < 2 || t.length > 40) return false;
+  if (!t || t.length < 2 || t.length > 50) return false;
   if (/https?:\/\/|www\.|📍|\+212|\+2[0-9]{11}|\d{8,}|📞/.test(t)) return false;
-  // Reject if it contains too many newlines (job listings, etc.)
   if ((t.match(/\n/g) || []).length > 2) return false;
   return true;
 }
 
 // ============================================================================
-// 8. MESSAGE HANDLER
+// 7. MESSAGE HANDLER
 // ============================================================================
 async function handleMessage(sock, msg) {
   if (!msg.message) return;
   if (botSentIds.has(msg.key?.id)) return;
 
-  const jid = msg.key?.remoteJid;
-  if (!jid) return;
-  // Block groups and broadcast
-  if (jid.includes('@g.us') || jid === 'status@broadcast') return;
-  // Block fromMe
+  const rawJid = msg.key?.remoteJid;
+  if (!rawJid || rawJid.includes('@g.us') || rawJid === 'status@broadcast') return;
   if (msg.key.fromMe) return;
 
-  const phone = jid.replace(/@.*$/, '');
+  const phone = normalizePhone(rawJid);
+  if (!phone) return;
+
+  // Clean canonical JID
+  const jid = `${phone}@s.whatsapp.net`;
   const isAdmin = KNOWN_ADMINS.has(phone);
 
   const coords = extractCoords(msg.message);
   const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
 
-  logger.info(`📥 [${phone}${isAdmin ? ' ADMIN' : ''}] text="${rawText.slice(0, 30)}" coords=${!!coords}`);
+  logger.info(`📥 [${phone}${isAdmin ? ' (ADMIN)' : ''}] text="${rawText.slice(0, 30)}" coords=${!!coords}`);
 
-  // ── ADMIN sends a message → just acknowledge, don't treat as client
   if (isAdmin) {
-    logger.info(`👑 Admin message received from ${phone} — no auto-reply.`);
+    logger.info(`👑 Admin message from ${phone} — ignored.`);
     return;
   }
 
-  // ── CLIENT message — notify admin with phone number immediately
   const session = getSession(phone);
-  const isNewClient = session.step === 'IDLE';
-  session.lastActivity = Date.now();
+  const isNew = session.step === 'IDLE';
 
-  // Send quick notification to admin on first contact
-  if (isNewClient) {
-    await alertAdmins(sock, phone, 'زبون جديد بدأ محادثة مع البوت 💬');
+  if (isNew && !coords) {
+    await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
   }
 
-  // — 1. LOCATION
+  // ── CAS 1: LOCATION RECEIVED
   if (coords) {
     const result = evaluateRealCoverage(coords.lat, coords.lng);
-    Object.assign(session, { lat: coords.lat, lng: coords.lng, result, step: 'WAITING_NAME' });
+    updateSession(phone, { lat: coords.lat, lng: coords.lng, result, step: 'WAITING_NAME' });
 
     let reply;
     if (result.status === 'DIRECT') {
-      reply = `🎉 *خبار زوين بزاف أخي!*\n\nالفايبر أوبتيك (*${result.operator}*) متوفر مباشرة في بقعتك (*${result.zoneName}*) ✅\n\nصيفط لينا *الاسم الكامل* ديالك باش نسجلو الطلب ويتاصل بك التقني اليوم 🚀`;
+      reply = `🎉 *خبار زوين بزاف أخي!*\n\nالفايبر أوبتيك (*${result.operator}*) متوفر مباشرة في بقعتك (*${result.zoneName}*) ✅\n\nصيفط لينا *الاسم الكامل* ديالك دابا باش نسجلو الطلب ويتاصل بك التقني اليوم للتركيب المجاني 🚀`;
     } else if (['BUFFER_15M', 'PROXIMITY_90'].includes(result.status)) {
-      reply = `👋 *أهلاً بك خويا!*\n\nموقعك قريب من شبكة الفايبر (*${result.operator}*) — أقرب كابل في *${result.zoneName}* على بعد ${result.distanceMeters}م ⚡\n\nإمكانية التوصيل 90% 📶\n\nصيفط لينا *الاسم الكامل* ديالك باش يخرج التقني يفحص ويتاصل بك!`;
+      reply = `👋 *أهلاً بك خويا العزيز!*\n\nموقعك قريب من شبكة الفايبر (*${result.operator}*) — أقرب كابل في *${result.zoneName}* على بعد حوالي ${result.distanceMeters}م ⚡\n\nإمكانية التوصيل للبناية ديالك واردة بنسبة 90% 📶\n\nعفاك صيفط لينا *الاسم الكامل* ديالك باش يخرج التقني يفحص البوكس ويتاصل بك! 📞`;
     } else if (result.status === 'PROXIMITY_FAR') {
-      reply = `🙏 *السلام عليكم أخاي!*\n\nموقعك على بعد *${result.distanceMeters}م* من أقرب كابلاج (*${result.zoneName}*).\n\nالتغطية غير مؤكدة، خاصنا فني ميداني.\n\nصيفط لينا *الاسم الكامل* ديالك باش نقيدوك ونرسل فني! 📋`;
+      reply = `🙏 *السلام عليكم أخاي!*\n\nموقعك على بعد *${result.distanceMeters}م* من أقرب كابلاج (*${result.zoneName}*).\n\nالتغطية غير مؤكدة، خاصنا فني يفحص ميدانياً.\n\nصيفط لينا *الاسم الكامل* ديالك باش نقيدوك ونرسل فني يفحص! 📋`;
     } else {
-      session.step = 'IDLE';
-      reply = `للأسف أخاي، موقعك بعيد على شبكة الفايبر الحالية (${result.distanceMeters}م) ⏳\n\nقيدت رقمك (+${phone}) وغادي نعلموك أول ما يصل الكابلاج لحيكم إن شاء الله 🙏`;
+      updateSession(phone, { step: 'IDLE' });
+      reply = `للأسف أخاي، موقعك حالياً بعيد على شبكة الفايبر المتوفرة (${result.distanceMeters}م) ⏳\n\nقيدت رقمك (+${phone}) وغادي تكون أول من نعلموه إن شاء الله أول ما يدوز الكابلاج لحيكم 🙏`;
     }
     await sendWithDelay(sock, jid, reply);
     return;
   }
 
-  // — 2. NAME (after location)
+  // ── CAS 2: NAME RECEIVED AFTER LOCATION
   if (session.step === 'WAITING_NAME') {
     if (!isValidName(rawText)) {
       await sendWithDelay(sock, jid, `عفاك أخي صيفط لينا *الاسم الكامل* ديالك فقط (مثلاً: محمد أمين) 🙏`);
       return;
     }
-    session.name = rawText;
-    session.step = 'COMPLETED';
-    await sendWithDelay(sock, jid,
-      `✅ تم تسجيل طلبك بنجاح سي *${rawText}*!\n\nسيتاصل بك التقني ديال *${session.result.operator}* في أقرب وقت لتحديد موعد التركيب المجاني 🚀\n\nشكراً على ثقتك! 🤝`
-    );
+
+    updateSession(phone, { name: rawText, step: 'COMPLETED' });
+
+    const confirmMsg =
+      `تم تسجيل طلبك بنجاح سي *${rawText}*! ✅\n\n` +
+      `غادي يتاصل بك التقني المعتمد ديال (*${session.result?.operator || 'IAM / Inwi'}*) في أقرب وقت لتحديد موعد التركيب المجاني والروتور 🚀.\n\n` +
+      `شكراً على ثقتك بنا 🤝!`;
+
+    await sendWithDelay(sock, jid, confirmMsg);
     await sendLeadAlert(sock, phone, rawText, session.result, session.lat, session.lng);
-    logger.info(`✅ LEAD: ${rawText} | +${phone} | ${session.result.status} | ${session.result.zoneName}`);
+    logger.info(`✅ LEAD CONFIRMED: ${rawText} | +${phone} | ${session.result?.zoneName}`);
     return;
   }
 
-  // — 3. DEFAULT WELCOME
-  session.step = 'WAITING_LOCATION';
+  // ── CAS 3: COMPLETED SESSION (FOLLOW-UP)
+  if (session.step === 'COMPLETED') {
+    updateSession(phone, { step: 'WAITING_LOCATION' });
+    await sendWithDelay(sock, jid,
+      `مرحباً بك مجدداً سي *${session.name || ''}*! 😊\n\nواش كاين شي استفسار آخر؟ أو صيفط لينا Localisation Pin جديد إلا بغيتي تفحص موقع آخر 📍`
+    );
+    return;
+  }
+
+  // ── CAS 4: DEFAULT WELCOME
+  updateSession(phone, { step: 'WAITING_LOCATION' });
   await sendWithDelay(sock, jid,
-    `السلام عليكم ورحمة الله! مرحباً بك في خدمة *الفايبر أوبتيك بالمغرب* 🇲🇦⚡\n\nنغطي شبكات *IAM* و*Inwi* — 2,448 منطقة على الخريطة الحقيقية.\n\n📍 *صيفط لينا Localisation Pin ديالك* من واتساب أو رابط Google Maps وغادي نعطيوك نتيجة التغطية في ثواني!`
+    `السلام عليكم ورحمة الله! مرحباً بك في خدمة *الفايبر أوبتيك بالمغرب* 🇲🇦⚡\n\n` +
+    `باش نعرفو واش منطقتكم مغطاة بـ *اتصالات المغرب (IAM)* أو *إنوي (Inwi)* ونعطيوك أحسن عرض:\n\n` +
+    `📍 *عفاك صيفط لينا Localisation Pin ديالك دابا عبر الواتساب* (أو صيفط رابط Google Maps ديال موقعك).\n\n` +
+    `السيستم غادي يفحص قاعدة بيانات التغطية (2,448 منطقة بالمغرب) أوتوماتيكياً في ثواني!`
   );
 }
 
 // ============================================================================
-// 9. INTERNET CHECK — works with WiFi, mobile hotspot, ethernet, any connection
+// 8. INTERNET CONNECTIVITY CHECK
 // ============================================================================
-let internetWasDown = false;
-
 function checkInternet() {
   return new Promise((resolve) => {
-    // Try TCP connect to Google DNS — works regardless of which network interface
-    const sock = new net.Socket();
-    sock.setTimeout(3000);
-    sock.on('connect', () => { sock.destroy(); resolve(true); });
-    sock.on('error',   () => { sock.destroy(); resolve(false); });
-    sock.on('timeout', () => { sock.destroy(); resolve(false); });
-    sock.connect(53, '8.8.8.8');
+    const s = new net.Socket();
+    s.setTimeout(3000);
+    s.on('connect', () => { s.destroy(); resolve(true); });
+    s.on('error',   () => { s.destroy(); resolve(false); });
+    s.on('timeout', () => { s.destroy(); resolve(false); });
+    s.connect(53, '8.8.8.8');
   });
 }
 
-async function waitForInternet(timeout = 600000) { // wait up to 10 min
-  const start = Date.now();
-  let attempt = 0;
-  while (Date.now() - start < timeout) {
-    const online = await checkInternet();
-    if (online) {
-      if (internetWasDown) {
-        logger.info('✅ Internet RESTORED — reconnecting to WhatsApp...');
-        internetWasDown = false;
-      }
-      return true;
-    }
-    attempt++;
-    internetWasDown = true;
-    // Log every 5 attempts to avoid spam
-    if (attempt % 5 === 1) logger.info(`⏳ [${attempt}] No internet yet (WiFi/hotspot off?) — waiting...`);
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  return false;
-}
+// ============================================================================
+// 9. EXPRESS APP FOR RENDER HEALTH CHECKS
+// ============================================================================
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
+app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP health server on port ${PORT}`));
 
 // ============================================================================
-// 10. MAIN BOT — Smart reconnect with WiFi-aware backoff
+// 10. MAIN BOT LOOP
 // ============================================================================
 async function startBot() {
-  logger.info('🚀 Nexus-Telecom Bot v4.0 starting...');
-
+  logger.info('🚀 Nexus-Telecom Bot v5.1 starting...');
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   const sock = makeWASocket({
@@ -340,7 +352,7 @@ async function startBot() {
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     browser: ['Chrome (Linux)', '', ''],
-    connectTimeoutMs: 20000,
+    connectTimeoutMs: 30000,
     keepAliveIntervalMs: 15000,
   });
 
@@ -348,32 +360,22 @@ async function startBot() {
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (connection === 'open') {
-      reconnectDelay = 3000; // reset delay on success
       logger.info('🎉 NEXUS-TELECOM BOT IS LIVE AND CONNECTED 24/7! 🚀');
     }
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      logger.warn(`⚠️ Disconnected [${code}]`);
+      logger.warn(`⚠️ Disconnected [${code}]. Checking connection...`);
 
       if (code === DisconnectReason.loggedOut) {
-        logger.error('🔴 Logged out! Delete auth_info_baileys/ and re-scan QR.');
+        logger.error('🔴 Logged out! Session needs re-linking.');
         process.exit(1);
       }
 
-      // ANY disconnect — check internet first before reconnecting
-      // This covers: WiFi off (408/503), PC sleep, router restart, etc.
-      internetWasDown = true;
-      logger.info('📡 Connection lost. Waiting for internet before reconnecting...');
-      const online = await waitForInternet(300000); // wait up to 5 min
-      if (online) {
-        reconnectDelay = 3000; // reset delay — internet is back
-      } else {
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
-      }
-
-      logger.info(`🔁 Reconnecting in ${Math.round(reconnectDelay / 1000)}s...`);
-      setTimeout(startBot, reconnectDelay);
+      const hasNet = await checkInternet();
+      const delay = hasNet ? 3000 : 10000;
+      logger.info(`Reconnecting in ${delay / 1000}s (internet: ${hasNet})...`);
+      setTimeout(startBot, delay);
     }
   });
 
@@ -384,10 +386,5 @@ async function startBot() {
     }
   });
 }
-
-process.on('uncaughtException', (e) => {
-  logger.error('Uncaught: ' + e.message);
-  setTimeout(startBot, 5000);
-});
 
 startBot();

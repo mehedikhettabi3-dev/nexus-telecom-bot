@@ -1,16 +1,21 @@
 services:
-  - type: worker
+  - type: web
     name: nexus-telecom-bot
     env: node
-    plan: free
+    plan: starter
     region: frankfurt
-    buildCommand: npm install
+    buildCommand: npm ci --omit=dev
     startCommand: node real_production_bot.js
+    healthCheckPath: /health
     disk:
       name: baileys-session-disk
       mountPath: /var/data
       sizeGB: 1
     envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
       - key: AUTH_DIR
         value: /var/data/auth_info_baileys
       - key: ADMIN_PHONE
@@ -19,3 +24,8 @@ services:
         value: 212699469649
       - key: BOT_PHONE
         value: 212699469649
+      - key: LOG_LEVEL
+        value: info
+      - key: MONGODB_URI
+        sync: false
+
